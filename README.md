@@ -1,0 +1,2 @@
+# Model-based-clustering-classification-and-Mem-Analysis-of-Performance-and-Salaries-of-NBA-Players
+In this project I've applied different methods to extract patterns in the performance and salaries of NBA players. I've used mixture models, model based clustering, model based classification and model based clustering with covariates to understand connection between the salaries and the performance  during the games of players. 
