@@ -1,0 +1,738 @@
+---
+title: "Analisi della performance e dei salari dei giocatori NBA"
+author: "Giulia de Innocentiis & Tommaso Pozzi"
+date: "2023-04-21"
+output: html_document
+---
+
+# Analisi della performance e dei salari dei giocatori NBA
+
+## Analisi esplorativa e pulizia del dataset
+
+Per lo svolgimento delle analisi per prima cosa si sono importati i due dataset: il primo relativo alle performance di tutti i giocatori dell'NBA nella stagione cestistica 2017-2018 e il secondo relativo ai salari ottenuti dagli stessi.
+
+```{r message=FALSE, warning=FALSE}
+library(data.table)
+library(corrplot)
+library(GGally)
+library(tidyverse)
+library(PerformanceAnalytics)
+library(plotly)
+library(mclust)
+library(Rmixmod)
+library(flexmix)
+library(caret)
+
+ss<-read.csv("Seasons_Stats.csv", stringsAsFactor=T)
+salary.table<-read.csv("NBA_season1718_salary.csv", stringsAsFactor=T)
+```
+
+Il dataset relativo alle performance dei giocatori conteneva 53 variabili con diverse problematiche che hanno richiesto una fase corposa di data pre-processing. Per prima cosa si è notata la presenza di diverse variabili con solo valori mancanti che sono state quindi eliminate. Dopodiche, dividendo le variabili *MP, PTS, AST, TRB, TOV, BLK, STL* per il numero complessivo di partite giocate nelle stagione, sono state create le corrispondenti variabili *MPG, PPG, APG, RPG, TOPG, BPG, SPG,* le quali, a differenza delle prime (che sono state successivamente eliminate), esprimono valori relativi e confrontabili tra i diversi giocatori . Dopo aver unito i due dataset tramite la variabile comune *Player,* si sono eliminate le osservazioni con valori mancanti, dato che presenti in numero molto limitato.
+
+```{r message=FALSE, warning=FALSE}
+stats17 <- 
+  ss %>% filter(Year >= 2017) %>% 
+  as_tibble() %>%
+  select(Year,Player, Pos, Age, Tm, G, MP, PER, FG:PTS) %>% 
+  distinct(Player, .keep_all = TRUE) %>% 
+  mutate(MPG = MP/G, PPG = PTS/G, APG = AST/G, 
+         RPG = TRB/G, TOPG = TOV/G, BPG = BLK/G, 
+         SPG = STL/G) 
+
+
+stats_salary <- merge(stats17, salary.table, by.x = "Player", by.y = "Player")
+#tolgo osservazioni con NA dato che sono un numero limitato
+stats_salary<-stats_salary[complete.cases(stats_salary),]
+names(stats_salary)[40] <- "salary17_18"
+
+stats_salary<-stats_salary[,-c(7, 25,24,28,27,26,30,38)]
+
+```
+
+Di conseguenza le variabili contenute nel dataset per ogni giocatore sono:
+
+-   *Player:* nome;
+
+-   *Year:* anno di riferimento della stagione;
+
+-   *Pos:* ruolo;
+
+-   *Age*: età;
+
+-   *Tm.x/Tm.y:* squadra;
+
+-   *G:* numero di partite giocate nella stagione;
+
+-   *PER:* punteggio complessivo individuale;
+
+-   *FG:* tiri dal campo riusciti;
+
+-   *FGA:* tiri dal campo tentati;
+
+-   *FG. :* percentuale di tiri dal campo riusciti rispetto a quelli tentati;
+
+-   *X3P:* tiri da 3 punti riusciti;
+
+-   *X3PA:* tiri da 3 punti tentati;
+
+-   *X3P. :* percenutale di tiri da 3 punti riusciti rispetto a quelli tentati;
+
+-   *X2P:* tiri da 2 punti riusciti;
+
+-   *X2PA:* tiri da 2 punti tentati;
+
+-   *X2P. :* percenutale di tiri da 2 punti riusciti rispetto a quelli tentati;
+
+-   *eFG. :* statistica che serve per aggiustare l'importanza dei tiri da 3 punti rispetto agli altri;
+
+-   *FT.* : tiri liberi riusciti;
+
+-   *FTA:* tiri liberi tentati;
+
+-   *FT. :* percenutale di tiri liberi riusciti rispetto a quelli tentati;
+
+-   *ORB:* somma dei rimbalzi offensivi catturati;
+
+-   *DRB:* somma dei rimbalzi difensivi catturati;
+
+-   *PF:* numero di falli commessi;
+
+-   *MPG:* minuti giocati per partita;
+
+-   *PPG:* punti segnati per partita;
+
+-   *APG:* assist realizzati per partita;
+
+-   *RPG:* rimbalzi catturati per partita;
+
+-   *TOPG:* palle perse per partita;
+
+-   *BPG:* stoppate realizzate per partita;
+
+-   *SPG:* palloni rubati per partita;
+
+-   *salary17_18:* salario .
+
+Per prima cosa si è notato che le variabili riguardanti i tiri sono ridondanti tra loro percui si è deciso di tenere, per ogni tipologia di tiro, soltanto la variabile riguardante le percentuali. Inoltre si sono rinominati i livelli della variabile Pos sapendo che le 5 posizioni possibili nel gioco del basket sono : C ( al centro), SG (guardia tiratrice), SF (Ala piccola), PF (Ala grande) e PG(Playmaker), e che tutte le altre posizioni presenti nella variabile *Pos* non sono assegnate a nessun giocatore.
+
+```{r}
+stats_salary<-stats_salary[,-c(8,9,11,12,14,15,18,19)]
+
+levels(stats_salary$Pos) = c('C', 'C', 'C', 'C','C', 'F', 'F', 'F','G', 'G', 'PF', 'PF','PF',
+                             'PG', 'PG', 'PG', 'SF', 'SF', 'SF', 'SF', 'SG','SG','SG','SG')
+
+levels(stats_salary$Pos) = c('C', 'C', 'C', 'PF', 'PG', 'SF', 'SG')
+```
+
+Una volta pulito il dataset si è proceduto con un'analisi della correlazione tramite il **corrplot** e si è notata un'elevata correlazione tra diverse variabili come tra PPG e MPG, con un valore intorno a 0.8.
+
+```{r message=FALSE, warning=FALSE}
+corrplot(cor(stats_salary %>% 
+               select(salary17_18, MPG:SPG, 
+                      Age, PER, contains("%")), 
+             use = "complete.obs"), 
+         method = "circle",type = "upper")
+```
+
+Data la situazione di elevata multicollinearità si è proceduto con una selezione delle variabili tramite l'analisi delle componenti principali sulle variabili numeriche presenti nel dataset. Si è scelto di selezionare un numero di componenti tali da spiegare circa l'80% della varianza e quindi si sono selezionate le prime cinque componenti. Tuttavia, per non perdere il significato delle variabili si sono utilizzate per le analisi le variabili con i pesi maggiori nella determinazione delle 5 componenti. In questo modo sono state selezionate le variabili DRB, FG. , X3P. , G, Age.
+
+```{r message=FALSE, warning=FALSE}
+
+non_num<-c(1,2,3,5,23)
+pca = princomp(stats_salary[,-non_num],cor=T) 
+sum((pca$sdev[1:5])^2)/19 
+
+pca$loadings[,1:5]
+pca_var<-names (stats_salary[,-non_num])[apply(pca$loadings[,1:5], 2, function(x) which(x**2==max(x**2)))]
+
+dati_pca<-stats_salary%>%
+  select(pca_var)
+
+```
+
+E' stata poi svolta un'analisi della correlazione tra le variabili selezionate, e come si può notare nel grafico sottostante, la correlazione è diminuita di molto, tranne per le variabili DRB e G che hanno un coefficiente di correlazione pari a 0.645. Inoltre si può notare dalle curve di densità non parametrica la presenza di multimodalità per tutte le variabili, in particolare per DRB e X3P. . Questo suggerisce la presenza di cluster nella popolazione e quindi l'ipotesi che la legge di distribuzione della popolazione sia una mistura di Gaussiane.
+
+```{r message=FALSE, warning=FALSE}
+ggpairs(dati_pca)
+p<-ggplot(data=dati_pca, aes(x=DRB))
+p<-p+geom_density(color="darkblue", fill="lightslateblue",linewidth=1.5) +theme(panel.background =element_rect (fill ="white"))
+p<-p+labs(title="Curva di densità non parametrica per la variabile DRB", y= "Curva di densità", x="DRB: numero di rimbalzi catturati")
+p<-p+ theme(plot.title = element_text(face="bold", size=18), axis.title = element_text(size=15))
+p
+
+p1<-ggplot(data=dati_pca, aes(x=X3P.))
+p1<-p1+geom_density( color="darkblue", fill="lightslateblue",linewidth=1.5) +theme(panel.background =element_rect (fill ="white"))
+p1<-p1+labs(title="Curva di densità non parametrica per la variabile X3P.", y= "Curva di densità", x="X3P: percentuali di tiri da 3 punti riusciti")
+p1<-p1+ theme(plot.title = element_text(face="bold", size=18), axis.title = element_text(size=15))
+p1
+
+```
+
+## Model-based Clustering
+
+Per verificare la presenza di cluster nella popolazione si è svolta un'implementazione dell'algortimo E-M per la stima delle componenti della mistura tramite la funzione **mclust.** Il modello stimato, migliore in base al criterio BIC, è un modello a 5 componenti di tipo VVI, ovvero con uguale orientamento in R\^5 ma diversa forma e volume dei cluster. I cluster stimati sembrano ben distanti come mostra l'indice di bontà dei cluster **R\^2** pari a 0.91068 e l'**entropia relativa** pari a 0.0002588. Inoltre si sono calcolate anche le distanze di **Kullback-Leibner** simmetrizzate tra i diversi cluster, dalle quali si nota una vicinanza tra il secondo e il terzo cluster e una massima distanza tra il primo e quinto.
+
+```{r message=FALSE, warning=FALSE}
+
+pca_clust<-Mclust(dati_pca)
+summary(pca_clust)
+
+#Parametri stimati
+#primo cluster
+media_1<-pca_clust$parameters$mean[,1] #media
+var_1<-pca_clust$parameters$variance$sigma[, , 1]
+p1<-pca_clust$parameters$pro [1]
+#secondo cluster
+media_2<-pca_clust$parameters$mean[,2]#media
+var_2<-pca_clust$parameters$variance$sigma[, , 2]
+p2<-pca_clust$parameters$pro[2]
+#terzo cluster
+media_3<-pca_clust$parameters$mean[,3]#media
+var_3<-pca_clust$parameters$variance$sigma[, , 3]
+p3<-pca_clust$parameters$pro[3]
+#quarto cluster
+media_4<-pca_clust$parameters$mean[,4]#media
+var_4<-pca_clust$parameters$variance$sigma[, , 4]
+p4<-pca_clust$parameters$pro[4]
+#quinto cluster
+media_5<-pca_clust$parameters$mean[,5]#media
+var_5<-pca_clust$parameters$variance$sigma[, , 5]
+p5<-pca_clust$parameters$pro[5]
+ 
+#entropia
+zi_j<- round(pca_clust$z)+0.0001
+EN<- - sum(zi_j*log(zi_j))
+EN/(nrow(dati_pca)*log(4)) #0.0025888988
+
+
+#R^2
+1-det(p1*var_1+p2*var_2+p3*var_3+p4*var_4+p5*var_5)/det(var(dati_pca)) #0.91068
+
+#KL_S
+KL_S<-function(mu1,mu2,sigma1,sigma2) {
+  1/2*t(mu1-mu2)%*%(solve(sigma1)+solve(sigma2))%*%(mu1-mu2)
+  +1/2*sum(diag(sigma1%*%solve(sigma2)+solve(sigma1)%*%sigma2))-length(mu1)
+}
+
+KL_S(media_1, media_2, var_1, var_2) #31.23
+KL_S(media_1, media_3, var_1, var_3) #16.74
+KL_S(media_1, media_4, var_1, var_4) #49.49
+KL_S(media_1, media_5, var_1, var_5) #52.298
+
+KL_S(media_3, media_2, var_3, var_2) #1.49
+KL_S(media_4, media_2, var_4, var_2)  #12
+KL_S(media_5, media_2, var_5, var_2) #3.77
+
+KL_S(media_3, media_4, var_3, var_4)  #13
+KL_S(media_3, media_5, var_3, var_5)  #13
+
+KL_S(media_4, media_5, var_4, var_5) #10.98
+
+```
+
+Si è calcolata anche l'incertezza per ogni unità statistica: essa è una misura ottenuta come il complemento a 1 della massima probabilità a posteriori di appartenere ai gruppi stimata dal modello. Come si può notare dalla dimensione dei punti nel secondo grafico, per diverse unità statistica i valori di incertezza sono abbastanza alti. Inoltre, guardando la distribuzione marginale tra G e FG. , si può osservare che i cluster stimati hanno effettivamente stesso orientamento rispetto agli assi ma forma e volume differente. Nel grafico si notano 2 cluster ben distinti dagli altri (quello verde e quello azzurro) mentre i rimanenti 3 sono sovrapposti e si nota infatti che i valori di incertezza delle unità statistiche appartenenti a quelle componenti sono maggiori.
+
+```{r message=FALSE, warning=FALSE}
+
+#uncertainty
+incertezza<-sort(round(pca_clust$uncertainty,4), decreasing=T)
+uncerPlot(pca_clust$z)
+
+coordProj(data=as.data.frame(dati_pca), dimens=c(1,4), what="uncertainty", 
+          parameters = pca_clust$parameters,z=pca_clust$z)
+```
+
+Si è poi individuato il modello migliore in base al criterio ICL tramite la funzione **mclustICL**, che è risultato essere il modello EVE con 4 componenti. Una volta stimato questo modello si sono calcolati gli indici di bontà dei cluster e si è ottenuto un R\^2 pari a 0.9334 e un'entropia relativa pari a 0.00369.ln base al primo indice il modello migliore è questo , mentre in base all'entropia è migliore il modello VVI con 5 componenti percui la scelta tra i due modelli è indifferente rispetto a questi due indici. Si è deciso di utilizzare come modello di clustering il modello EVE con 4 componenti scelto tramite ICL in quanto esso è un criterio migliore per la scelta di un raggruppamento ottimo.
+
+```{r message=FALSE, warning=FALSE}
+pca_clustICL<-mclustICL(dati_pca)
+
+
+pca_clustICL<-Mclust(dati_pca,modelNames="EVE", G=4)
+
+#primo cluster
+media_1<-pca_clustICL$parameters$mean[,1] #media
+var_1<-pca_clustICL$parameters$variance$sigma[, , 1]
+p1<-pca_clustICL$parameters$pro [1]
+#secondo cluster
+media_2<-pca_clustICL$parameters$mean[,2]#media
+var_2<-pca_clustICL$parameters$variance$sigma[, , 2]
+p2<-pca_clustICL$parameters$pro[2]
+#terzo cluster
+media_3<-pca_clustICL$parameters$mean[,3]#media
+var_3<-pca_clustICL$parameters$variance$sigma[, , 3]
+p3<-pca_clustICL$parameters$pro[3]
+#quarto cluster
+media_4<-pca_clustICL$parameters$mean[,4]#media
+var_4<-pca_clustICL$parameters$variance$sigma[, , 4]
+p4<-pca_clustICL$parameters$pro[4]
+
+#Calcolare entropia, R^2, KLS 
+#entropia
+zi_j<- round(pca_clustICL$z)+0.0001
+EN<- - sum(zi_j*log(zi_j))
+EN/nrow(dati_pca)*log(4) #0.00369
+
+#R^2
+1-det(p1*var_1+p2*var_2+p3*var_3+p4*var_4)/det(var(dati_pca)) #0.9334
+
+#KL_S
+
+
+KL_S(media_1, media_2, var_1, var_2) #44
+KL_S(media_1, media_3, var_1, var_3) #11
+KL_S(media_1, media_4, var_1, var_4) #81
+
+KL_S(media_3, media_2, var_3, var_2) #3.7
+KL_S(media_4, media_2, var_4, var_2)  #2.9
+
+KL_S(media_3, media_4, var_3, var_4) #5.84
+
+
+
+
+```
+
+Nel grafico analogo a quello svolto precedentemente si nota come i cluster in questi caso abbiano stesso orientamento e volume ma forma differente. I cluster risultano ben separati anche in questo caso e rispetto a primo le unità statistiche con valori di incertezza elevati sono in un numero minore.
+
+```{r}
+coordProj(data=as.data.frame(dati_pca), dimens=c(2,4), what="uncertainty", 
+          parameters = pca_clustICL$parameters,z=pca_clustICL$z, 
+          colors=c("hotpink3", "green", "darkblue", "orangered2"))
+
+```
+
+Una volta stimati i cluster si è passati all'analisi degli stessi. Per prima cosa si sono osservati con attenzione i parametri delle singole componenti della mistura, con particolare riferimento ai valori attesi e alle mixing probabilities. Come si può notare tra i cluster c'è una notevole differenza nella media delle variabili DRB,G e age. Il primo cluster comprende i giocatori più giovani, di età media intorno ai 23 anni, che hanno giocato un numero molto limitato di partite, che riescono a portare a termine pochi tiri da 3 punti e che soprattutto riescono a catturare pochi rimbalzi. Il secondo cluster invece comprende i giocatori con le statistiche migliori, aventi il numero di partite in media giocate più alto, così come la percentuale di tiri da 3 punti riusciti e un'età media pari a circa 27 anni. La terza componente sembra includere giocatori di medio livello, di età media intorno ai 25 anni, con numero di partite giocate e e rimbalzi catturati poco elevati.La quarta componente raggruppa i giocatori più forti in termini di rimbalzi catturati e tiri dal campo riusciti, ma con una capacità limitata di mettere a segno tiri da 3 punti.
+
+```{r}
+c(media_1,p1)
+c(media_2,p2)
+c(media_3,p3)
+c(media_4,p4)
+
+```
+
+Per svolgere un'analisi più approfondita dei cluster si è svolta una classificazione delle unità statistiche in base al **Naive Bayes Classifier** e si sono analizzati i gruppi in base a tutte le variabili disponibili(non soltanto quelle selezionate attraverso PCA), mostrando particolare attenzione alle differenze tra le medie della variabile *salary, PPG* (punti totali per partita) e *PER* (punteggio complessivo del giocatore) tra le componenti. I valori delle variabili sovrastanti dimostrano quello già evidenziato in precedenza. I giocatori della prima componente hanno una performance scarsa sia in termini di PER che di PPG e di conseguenza hanno come salario medio il minore tra le quattro componenti; considerando anche il numero limitato di partite giocate e l'età media inferiore potrebbe essere la classe comprendente i giocatori emergenti. La media dei punti segnati per partita e del punteggio complessivo dei giocatori del terzo gruppo sembrano confermare l'ipotesi che sia il cluster dei giocatori di medio livello, i quali hanno un salario medio basso. Il secondo e il quarto cluster racchiudono sicuramente i giocatori più forti, con un punteggio complessivo maggiore nel quarto cluster e un numero di punti segnati per partita maggiore nel secondo cluster. Queste due componenti hanno come media di salario un valore molto alto e distante rispetto alle altre due componenti.
+
+```{r message=FALSE, warning=FALSE}
+prob.post<-pca_clustICL$z
+etichetta<-c()
+for (j in 1:nrow(dati_pca)) {
+  etichetta[j]<-which(prob.post[j,]==max(prob.post[j,]))
+}
+n1<-length(which(etichetta==1))
+n2<-length(which(etichetta==2))
+n3<-length(which(etichetta==3))
+n4<-length(which(etichetta==4))
+gruppo1<-stats_salary[which(etichetta==1),]
+gruppo2<-stats_salary[which(etichetta==2),]
+gruppo3<-stats_salary[which(etichetta==3),]
+gruppo4<-stats_salary[which(etichetta==4),]
+mean(gruppo1$salary17_18) #1326466
+mean(gruppo1$PER) #11.386
+mean(gruppo1$PPG) #4.08
+mean(gruppo2$salary17_18) #9294118 
+mean(gruppo2$PER)#14.375
+mean(gruppo2$PPG) #11.64
+mean(gruppo3$salary17_18) #3772362
+mean(gruppo3$PER) #11.979
+mean(gruppo3$PPG) #7.122
+mean(gruppo4$salary17_18) #10012831
+mean(gruppo4$PER) #17.197
+mean(gruppo4$PPG)
+```
+
+Per concludere l'analisi di clustering si è costruito un grafico rappresentante gli scatterplot per ogni coppia di variabili (quelle selezionate tramite PCA) colorando le stesse in base al cluster di appartenenza. Per tutti i grafici a dispersione tra la variabile *DRB* e le altre si osserva una distinzione evidente tra i diversi cluster, mentre per la variabile *FG.* si hanno dei risultati un po' confusi.
+
+```{r message=FALSE, warning=FALSE}
+panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor, ...) {
+  usr <- par("usr")
+  on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  Cor <- abs(cor(x, y)) # Remove abs function if desired
+  txt <- paste0(prefix, format(c(Cor, 0.123456789), digits = digits)[1])
+  if(missing(cex.cor)) {
+    cex.cor <- 0.4 / strwidth(txt)
+  }
+  text(0.5, 0.5, txt,
+       cex = 1 + cex.cor * Cor) # Resize the text by level of correlation
+}
+
+pairs(dati_pca,
+      upper.panel = panel.cor,    # Correlation panel
+      lower.panel = panel.smooth,
+      bg = as.numeric(pca_clustICL$classification)+1,
+      col = as.numeric(pca_clustICL$classification)+1,
+      pch = 21,
+      rowlattop = T,
+      gap = 1,
+      cex.labels = NULL, legend=T,
+      font.labels = 1, main="Scatterplot delle variabili selezionate con PCA differenziate per cluster")
+
+```
+
+## Model-based Classification
+
+Proseguendo con l'analisi è possibile osservare, dalle principali statistiche descrittive della variabile *salary* la possibilità di una suddivisione in 3 classi di salario principali: `Low, Medium, High` con cui sono distribuiti i fenomeni della pallacanestro statunitense. Si è proceduto quindi con la creazione della nuova variabile *salary_class* e l'aggiunta di quest'ultima alle variabili selezionate in precedenza con PCA. Come pronosticabile la classe rappresentativa degli atleti che ricevono un salario 'basso' è la più numerosa e contiene ben 311 osservazioni a discapito di quella intermedia che ne contiene 78 e quella rappresentativa dei giocatori 'top' che ne contiene soltanto 22.
+
+```{r message=FALSE, warning=FALSE}
+stats_salary <- stats_salary %>%
+  mutate(salary_class = cut(salary17_18, breaks = 3, labels =c('Low', 'Medium','High'), include.lowest = TRUE))
+
+
+pca_dati = stats_salary %>%
+  select(DRB, FG., X3P., G, Age, salary_class)
+
+summary(stats_salary$salary_class)
+```
+
+Dopo aver diviso il dataset in training e test è stato stimato il modello di classificazione tramite le funzione **mixmodLearn** che procede con la stima di un modello EDDA: esso presuppone una mistura di normali per la popolazione (ipotizzata senza campionamento retrospettivo) tramite la stima di un modello per ogni possibile restrizione sulla matrice delle varianze dei gruppi. Sono state svolte diverse stime di modelli con l'obbiettivo di scegliere il modello migliore in termini di Cross-Validation, V-Fold validation e BIC. Il primo modello stimato è un modello Gaussian_pk_Lk_D\_Ak_D che produce un misclassification error rate pari a 0.2048193, BIC pari a 8164.2356 e CV pari a 0.2165
+
+```{r message=FALSE, warning=FALSE}
+RNGkind("Mersenne-Twister", "Inversion", "Rounding")
+set.seed(121)
+training_label = sample(1:nrow(pca_dati), size = 0.8*nrow(pca_dati), replace = F)
+training = pca_dati[training_label, -6]
+train_class = pca_dati[training_label, 6]
+test = pca_dati[-training_label, -6]
+test_labels = pca_dati[-training_label, 6]
+
+res = mixmodLearn(training, train_class, models = mixmodGaussianModel(family = 'all', equal.proportions = F), criterion = c('CV', 'BIC'))
+res@bestResult 
+res@bestResult@model
+
+pred = mixmodPredict(test, classificationRule = res@bestResult)
+1-mean(as.integer(test_labels) == pred["partition"])
+RNGkind("default")
+```
+
+Dopodichè si è svolto un confronto tra i valori del BIC e del CV dei 14 possibili modelli stimati dalla funzione e, come si può osservare nei grafici sottostanti, in base al BIC il modello migliore è il modello Gaussian pk_Lk_Ck (EVV) mentre secondo il CV il modello migliore è il modello più complesso Gaussian pk_Lk_D\_Ak_D. Guardando il grafico del BIC si può però notare che molti modelli diversi tra loro hanno lo stesso valore percui sarebbe meglio usare un altro criterio di confronto.
+
+```{r message=FALSE, warning=FALSE}
+BIC = CV = rep(NA ,length(res@models@listModels) )
+for (i in 1: length(res@models@listModels)){
+  ind = which(res@results [[i]] @model == res@models@listModels)
+  CV[ind] = res@results [[i]] @criterionValue [1]
+  BIC[ind] = res@results [[i]] @criterionValue [2]
+}
+
+round(BIC,1)
+min(BIC) 
+which.min(BIC) 
+
+round(CV,3)
+min(CV)
+which.min(CV) 
+
+par(mfrow=c(2,1))
+plot(BIC ,type='b',xlab='',xaxt='n',col =2); axis(1,at=1: length(
+  res@results),labels=substr(res@models@listModels ,10 ,30),cex.axis =0.8
+  ,las =2)
+abline(v=which.min(BIC), col=1, lty =2)
+
+plot(CV ,type='b',xlab='',xaxt='n',col =3); axis(1,at=1: length(
+  res@results),labels=substr(res@models@listModels,10 ,30),cex.axis =0.8
+  ,las =2)
+abline(v=which.min(CV), col=1, lty =2)
+par(mfrow=c(1,1))
+```
+
+Un ulteriore criterio di confronto è la V-fold validation che indica come modelli migliori il Gaussian_pk_Lk_D\_Ak_D, il Gaussian_pk_L\_B, il Gaussian_pk_L\_Bk e il Gaussian_pk_L\_Ck.
+
+```{r message=FALSE, warning=FALSE}
+set.seed(121)
+n = nrow(pca_dati)
+V = 25
+B = round(n/V); err = matrix(NA,V, 3)
+for (v in 1:V){
+  mod = mixmodLearn(training, train_class, models = mixmodGaussianModel(family = 'all', equal.proportions = F), criterion = c('CV', 'BIC'), nbCVBlocks = v)
+  classrule = mod@bestResult
+  pred = mixmodPredict(test, classificationRule = classrule)
+  err[v,1] = v
+  err[v,2] = as.numeric(1-mean(as.integer(test_labels) == pred["partition"]))
+  err[v,3] = mod@bestResult@model
+}
+err
+```
+
+Per scegliere tra essi si sono stimati tutti e 4 i modelli e sono stati confrontati i valori del CER.
+
+```{r message=FALSE, warning=FALSE}
+mod = mixmodLearn(training, train_class, models = mixmodGaussianModel(listModels = "Gaussian_pk_Lk_D_Ak_D"), criterion = c('CV', 'BIC'), nbCVBlocks = 3)
+classrule = mod@bestResult
+pred = mixmodPredict(test, classificationRule = classrule)
+pred@proba
+1-mean(as.integer(test_labels) == pred["partition"])
+
+mod = mixmodLearn(training, train_class, models = mixmodGaussianModel(listModels = "Gaussian_pk_L_B"), criterion = c('CV', 'BIC'))
+classrule = mod@bestResult
+pred = mixmodPredict(test, classificationRule = classrule)
+1-mean(as.integer(test_labels) == pred["partition"]) #CER = 0.1927711
+
+mod = mixmodLearn(training, train_class, models = mixmodGaussianModel(listModels = "Gaussian_pk_L_Bk"), criterion = c('CV', 'BIC'))
+classrule = mod@bestResult
+pred = mixmodPredict(test, classificationRule = classrule)
+1-mean(as.integer(test_labels) == pred["partition"]) #CER = 0.168647
+
+mod = mixmodLearn(training, train_class, models = mixmodGaussianModel(listModels = "Gaussian_pk_L_Ck"), criterion = c('CV', 'BIC'))
+classrule = mod@bestResult
+pred = mixmodPredict(test, classificationRule = classrule)
+
+1-mean(as.integer(test_labels) == pred["partition"]) #
+
+```
+
+Il modello con il CER minore è risultato essere il Gaussian_pk_Lk_D\_Ak_D percui si è utilizzato come modello nella classificazione, ottenendo la matrice di confusione sottostante. Dalla classificazione si verifica un valore di accuracy pari a 0.8675 e quindi un classification error rate pari al 13.325%.
+
+```{r message=FALSE, warning=FALSE}
+#Utilizzo il modello che produce l'errore minore
+mod = mixmodLearn(training, train_class, models = mixmodGaussianModel(listModels = "Gaussian_pk_Lk_D_Ak_D"), criterion = c('CV', 'BIC'), nbCVBlocks = 3)
+classrule = mod@bestResult
+pred = mixmodPredict(test, classificationRule = classrule)
+1-mean(as.integer(test_labels) == pred["partition"])
+
+#Senza V-FOlD: 
+
+mod = mixmodLearn(training, train_class, models = mixmodGaussianModel(listModels = "Gaussian_pk_Lk_D_Ak_D"), criterion = c('CV', 'BIC'))
+classrule = mod@bestResult
+predi = mixmodPredict(test, classificationRule = classrule)
+1-mean(as.integer(test_labels) == predi["partition"])
+
+prediction = as.factor(pred["partition"]); levels(prediction) = c('Low', 'Medium','High')
+confusionMatrix(test_labels, prediction)
+```
+
+Si è provato a svolgere l'analisi di classificazione anche tramite modello MDA. Si sono ottenuti modelli complessi, con componenti moolto complesse ( per la classe High sono stati stimati 8 cluster) con un CER piuttosto basso ma comunque superiore a quello ottenuto con il modello EDDA. Si è proceduto con un algoritmo per la scelta del numero di componenti interne delle componenti della mistura ma con un numero di cluster fisso per ogni componente si ottengono CER raddoppiati a quello ottenuto nel modello stimato inizialmente con numero di cluster variabile. Dato che il CER è superiore a quello ottenuto col modello EDDA si dichiara come migliore modello per classificazione il modello EDDA Gaussian pk_Lk_D\_Ak_D.
+
+```{r message=FALSE, warning=FALSE}
+
+mod = MclustDA(training, train_class, G  = 1:9)
+summary(mod) #Modelli molto complessi, addirittura High presenta 8 cluster
+pred = predict(mod, test)$class
+sum(pred != test_labels)/length(test_labels) 
+
+
+# Choice of G by cross-validation
+#--------------------------------
+G = 10; V = 10; perm = sample(n)
+n = nrow(pca_dati)
+B = round(n/V); err = matrix(NA ,G,V)
+
+for (g in 1:G){
+  for (v in 1:V){
+    test.set.labels = perm[(B*(v-1)+1):(B*v)]
+    mod = MclustDA(training, train_class,G=1:g)
+    err[g,v] = sum(predict(mod ,test)$class != test_labels) / B
+  }
+}
+err
+err
+round(rowMeans(err),4) 
+
+```
+
+Si è poi costruito un grafico interattivo che mostra i risultati ottenuti e in particolare le osservazioni classificate in maniera errata del test set (in rosso) distinte per le 3 variabili più discriminanti nella formazione dei 3 cluster.
+
+```{r message=FALSE, warning=FALSE}
+
+color = test %>% mutate(miss = ifelse(as.integer(test_labels) == predi["partition"], 0, 1))
+color$miss = as.factor(color$miss)
+levels(color$miss) = c('Correct', 'Miss Classificate')
+
+
+color %>% 
+  
+  plot_ly(x=~DRB,y=~G,z= ~Age,color = ~miss ,hoverinfo = 'text', colors = c( 'green', 'red'),
+          
+          text = ~paste('Classification:', miss,
+                        
+                        '<br>DRB:', DRB,
+                        
+                        '<br>G:', G,
+                        
+                        '<br>Age:', Age)) %>% 
+  
+  add_markers(opacity = 0.8) %>%
+  
+  layout(title = "3D NBA Salary Class",
+         
+         annotations=list(yref='paper',xref="paper",y=1.05,x=1.1, text="Classification",showarrow=F),
+         
+         scene = list(xaxis = list(title = 'DRB'),
+                      
+                      yaxis = list(title = 'Game'),
+                      
+                      zaxis = list(title = 'Age')))
+```
+
+## Model based clustering with covariates
+
+Come ultima analisi viene sviluppato un modello Mixture Of Expert Models utilizzando come covariate le variabili selezionate attraverso l'analisi in componenti principali e come risposta la variabile *salary*. Dato che la variabile *salary* è strettamente positiva si è deciso di effettuare una trasformazione logaritmica per ottenere così una più accentuata normalità e una distribuzione che evidenzi le multimodalità con cui essa verrà clusterizzata, come si può notare nei grafici sottostanti.
+
+```{r message=FALSE, warning=FALSE}
+regression<-stats_salary%>%
+  select(pca_var, Tm.x, Pos, Player, salary17_18)
+
+#distribuzione salary 
+ggplot(data=stats_salary, aes(x=salary17_18))+
+  geom_density()
+ggplot(data=stats_salary, aes(x=salary17_18))+
+  geom_histogram()
+
+d1 = ggplot(data=stats_salary, aes(x=log_salary, y = ..density..))+
+  #geom_histogram(position = 'identity', binwidth = 0.3, bins = 20, color = 'white', fill = 'cornflowerblue')+ #Si può notare facilmente la multimodalità
+  geom_density(
+    fill = 'cornflowerblue',
+    kernel = 'gaussian',
+   # bw = 0.3,
+    color = 'black'
+  )+
+  labs(
+    x = 'Logaritmo del salario', 
+    y = 'Densità',
+    title = 'Distribuzione della variabile Logaritmo Di Salary17_18'
+  )+
+  theme_minimal()
+d1
+
+d2 = ggplot(data=stats_salary, aes(x=salary17_18, y = ..density..))+
+  #geom_histogram(position = 'identity', binwidth = 0.3, bins = 20, color = 'white', fill = 'cornflowerblue')+ #Si può notare facilmente la multimodalità
+  geom_density(
+    fill = 'indianred',
+    kernel = 'gaussian',
+    color = 'black'
+  )+
+  labs(
+    x = 'Salario', 
+    y = 'Densità',
+    title = 'Distribuzione della variabile Salary17_18'
+  )+
+  theme_minimal()
+d2
+```
+
+Si è effettuata la regressione sulla trasformata logaritmica del salario e si è scelto il numero ottimale di cluster con la funzione **stepFlexmix,** che è risultato essere pari a 3.
+
+```{r}
+log_salary<-log(stats_salary$salary17_18)
+reg = flexmix(log_salary~DRB+FG.+X3P.+G+Age, data = regression, k = 3, concomitant =FLXPmultinom(~DRB+FG.+X3P.+G+Age))
+
+labs_log = reg@cluster
+
+
+final.v = stepFlexmix(log(salary17_18)~DRB+FG.+X3P.+G+Age, k = 1:5, data = regression, concomitant = FLXPmultinom(~DRB+FG.+X3P.+G+Age), nrep = 10, 
+                      verbose = TRUE, drop = F, unique = FALSE)
+
+final.v
+```
+
+Per ottenere un risultato ottimale nella stima dei parametri delle componenti si sono considerati diversi valori di inizio per l'algoritmo EM stimando il modello 50 volte e considerando il modello migliore in base al BIC e ICL. Si è scelto di analizzare il modello migliore in base al criterio ICL e si è quindi analizzata la parte di Gating Network del modello e i parametri stimati. Si è calcolata anceh l'entropia tra i cluster stimati -
+
+```{r}
+
+bicval <- Inf
+itermax <- 50
+bics<-matrix(nrow=itermax,ncol=2)
+
+for (iter in 1: itermax){
+  fit <- flexmix(log_salary~DRB+FG.+X3P.+G+Age, data = regression, k = 3, concomitant =FLXPmultinom(~DRB+FG.+X3P.+G+Age))
+  bics[iter,]<-c(iter,BIC(fit))
+  if (bicval >BIC(fit))
+  {
+    bicval <- BIC(fit)
+    bestfit <- fit
+  }
+}
+
+bics
+summary(bestfit)
+labs_best<-bestfit@cluster
+
+
+#ICL best fit
+ICLval <- Inf
+itermax <- 50
+ICLs<-matrix(nrow=itermax,ncol=2)
+
+for (iter in 1: itermax){
+  fit <- flexmix(log_salary~DRB+FG.+X3P.+G+Age, data = regression, k = 3, concomitant =FLXPmultinom(~DRB+FG.+X3P.+G+Age))
+  ICLs[iter,]<-c(iter,ICL(fit))
+  if (ICLval >ICL(fit))
+  {
+    ICLval <- ICL(fit)
+    bestfit <- fit
+  }
+}
+
+summary(bestfit)
+parameters(bestfit)
+parameters(bestfit ,which="concomitant")
+KLdiv(fit) 
+
+
+z_ij = round(bestfit@posterior$unscaled, 5)+0.00001
+(EN = -sum(z_ij*log(z_ij)))
+(EN/(411*log(3)))
+```
+
+Si sono poi effettuate diverse rappresentazioni grafiche del modello, raffigurando per ogni variabile la distribuzione stimata dal modello rispetto alla variabile risposta. In tutte si può notare come i cluster stimati siano ben distanti tra loro.
+
+```{r message=FALSE, warning=FALSE}
+regression$Player = as.character(regression$Player)
+labs = bestfit@cluster
+
+(DRB = ggplot(data=regression, mapping = aes(x=DRB, y=log(salary17_18),label = Player ,color=factor(labs)))+
+  geom_text(check_overlap = TRUE)+ 
+  geom_smooth(method="lm", se=F, size=1)+
+  xlim(0, 830)+
+    theme_minimal()+
+    theme(legend.position = "none"))+
+   labs(y = 'Logaritmo del Salario', 
+       x = 'DRB')
+```
+
+```{r}
+(G = ggplot(data=regression, mapping = aes(x=G, y=log(salary17_18),label = Player ,color=factor(labs)))+
+  geom_text(check_overlap = TRUE)+ 
+  geom_smooth(method="lm", se=F, size=1)+
+  xlim(0, 90)+
+  theme_minimal()+
+  theme(legend.position = "none"))+
+   labs(y = 'Logaritmo del Salario', 
+       x = 'Numero di partite giocate')
+```
+
+```{r message=FALSE, warning=FALSE}
+ggplot(data=regression, mapping = aes(x=Age, y=log(salary17_18),label = Player ,color=factor(labs)))+
+  geom_text(check_overlap = TRUE)+ 
+  geom_smooth(method="lm", se=F, size=1)+
+  xlim(15, 43)+
+  theme_minimal()+
+  theme(legend.position = "none")+
+  labs(y = 'Logaritmo del Salario', 
+       x = 'Age')
+```
+
+```{r message=FALSE, warning=FALSE}
+
+(X3P = ggplot(data=regression, mapping = aes(x=X3P., y=log(salary17_18),label = Player ,color=factor(labs)))+
+  geom_text(check_overlap = TRUE)+ 
+  geom_smooth(method="lm", se=F, size=1)+
+  xlim(0, 1)+
+  theme_minimal()+
+  theme(legend.position = "none"))+
+ labs(y = 'Logaritmo del Salario', 
+       x = 'X3P')
+```
+
+```{r}
+
+(FG = ggplot(data=regression, mapping = aes(x=FG., y=log(salary17_18), label = Player ,color=factor(labs)))+
+  geom_text(check_overlap = T)+ 
+  geom_smooth(method="lm", se=F, size=1)+
+  xlim(0, 0.75)+
+  theme_minimal()+
+  theme(legend.position = "none"))+
+   labs(y = 'Logaritmo del Salario', 
+       x = 'FG')
+```
