@@ -38,4 +38,4 @@ library(caret)
 # ...
 
 # Run the R Markdown file
-rmarkdown::render("deInnocentiis_Pozzi_appendice.Rmd")
+rmarkdown::render("code_NBA.Rmd")
